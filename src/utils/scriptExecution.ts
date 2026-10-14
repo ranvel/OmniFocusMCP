@@ -339,81 +339,47 @@ const escapeContent = (content: string) => {
     .replace(/\$/g, "\\$"); // Escape dollar signs
 };
 
-// Function to execute scripts in OmniFocus using the URL scheme
-export async function executeOmniFocusScript(
-  scriptPath: string,
-  args?: string[]
-): Promise<any> {
-  const start = Date.now();
-  try {
-    // Get the actual script path
-    let actualPath;
-    if (scriptPath.startsWith("@")) {
-      const scriptName = scriptPath.substring(1);
-      const __filename = fileURLToPath(import.meta.url);
-      const __dirname = dirname(__filename);
+/**
+ * A JavaScript string literal for any string. `JSON.stringify` already escapes
+ * quotes, backslashes and control characters; the two Unicode line separators
+ * are the one thing JSON allows raw that a JS source line must not contain.
+ */
+function jsStringLiteral(value: string): string {
+  // Spelled without \u escapes in source so no tool between here and the
+  // file can turn them into the raw characters they stand for.
+  const LS = String.fromCharCode(0x2028);
+  const PS = String.fromCharCode(0x2029);
+  return JSON.stringify(value)
+    .split(LS).join('\\' + 'u2028')
+    .split(PS).join('\\' + 'u2029');
+}
 
-      const distPath = join(
-        __dirname,
-        "..",
-        "utils",
-        "omnifocusScripts",
-        scriptName
-      );
-      const srcPath = join(
-        __dirname,
-        "..",
-        "..",
-        "src",
-        "utils",
-        "omnifocusScripts",
-        scriptName
-      );
+/**
+ * Resolve `@name.js` to a file under `omnifocusScripts/` (dist first, then
+ * src); any other path is used as given.
+ */
+function resolveScriptPath(scriptPath: string): string {
+  if (!scriptPath.startsWith("@")) return scriptPath;
+  const scriptName = scriptPath.substring(1);
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
 
-      if (existsSync(distPath)) {
-        actualPath = distPath;
-      } else if (existsSync(srcPath)) {
-        actualPath = srcPath;
-      } else {
-        actualPath = join(__dirname, "..", "omnifocusScripts", scriptName);
-      }
-    } else {
-      actualPath = scriptPath;
-    }
+  const distPath = join(__dirname, "..", "utils", "omnifocusScripts", scriptName);
+  const srcPath = join(__dirname, "..", "..", "src", "utils", "omnifocusScripts", scriptName);
 
-    // Read the script file
-    const scriptContent = readFileSync(actualPath, "utf8");
+  if (existsSync(distPath)) return distPath;
+  if (existsSync(srcPath)) return srcPath;
+  return join(__dirname, "..", "omnifocusScripts", scriptName);
+}
 
-    // Create a wrapper script that sets up arguments and executes the original script.
-    //
-    // Every payload gets `formatDate` from the canonical implementation (#91) instead
-    // of declaring its own. The payloads each used to carry a `toISOString()` copy,
-    // which meant a timezone fix had to be applied in N places or silently only
-    // half-land. Payloads must NOT declare `formatDate` themselves — a `function`
-    // declaration alongside this `const` is a redeclaration SyntaxError, which the
-    // prelude test asserts against.
-    let wrappedScript = `${JXA_FORMAT_DATE_SOURCE}\n\n${scriptContent}`;
-
-    if (args && args.length > 0) {
-      const quotedArgs = args
-        .map((arg) => `"${escapeContent(arg)}"`)
-        .join(", ");
-      wrappedScript = `${JXA_FORMAT_DATE_SOURCE}
-
-// Set up arguments
-const argv = [${quotedArgs}];
-
-${scriptContent}`;
-    }
-
-    // Create a temporary file for our JXA wrapper script
-    const tempFile = join(tmpdir(), `jxa_wrapper_${crypto.randomUUID()}.js`);
-
-    // Escape the script content properly for use in JXA
-    const escapedScript = escapeContent(wrappedScript);
-
-    // Create a JXA script that will execute our OmniJS script in OmniFocus
-    const jxaScript = `
+/**
+ * The one JXA shim that carries an OmniJS payload into OmniFocus. `sections`
+ * are joined with blank lines into the payload; the payload is escaped into a
+ * template literal, so backslashes, backticks and `$` in it survive verbatim.
+ */
+function buildOmniJsWrapper(sections: string[]): string {
+  const escapedScript = escapeContent(sections.join("\n\n"));
+  return `
     function run() {
       try {
         const app = Application('OmniFocus');
@@ -429,20 +395,59 @@ ${scriptContent}`;
       }
     }
     `;
+}
 
-    _logger?.debug("scriptExecution", `Executing OmniFocus script: ${scriptPath}`);
-
-    // Write the JXA script to the temporary file
-    writeFileSync(tempFile, jxaScript);
-
-    // Execute the JXA script using osascript (read path — safe to retry on -1712)
-    const { stdout, stderr } = await runOsascriptFile(tempFile, {
+/** Write the wrapper to a temp file and run it through the shared transport. */
+async function runOmniJsPayload(opts: {
+  label: string;
+  sections: string[];
+  retryOnTimeout: boolean;
+}): Promise<{ stdout: string; stderr: string }> {
+  const tempFile = join(tmpdir(), `jxa_wrapper_${crypto.randomUUID()}.js`);
+  _logger?.debug("scriptExecution", `Executing OmniFocus script: ${opts.label}`);
+  writeFileSync(tempFile, buildOmniJsWrapper(opts.sections));
+  try {
+    return await runOsascriptFile(tempFile, {
       language: 'JavaScript',
+      retryOnTimeout: opts.retryOnTimeout,
+    });
+  } finally {
+    try { unlinkSync(tempFile); } catch {}
+  }
+}
+
+/**
+ * Run a read-only OmniJS script inside OmniFocus. Arguments arrive in the
+ * payload as the `argv` array (only declared when there are any). Safe to retry
+ * on -1712 because reads are idempotent.
+ */
+export async function executeOmniFocusScript(
+  scriptPath: string,
+  args?: string[]
+): Promise<any> {
+  const start = Date.now();
+  try {
+    const scriptContent = readFileSync(resolveScriptPath(scriptPath), "utf8");
+
+    // Every payload gets `formatDate` from the canonical implementation (#91) instead
+    // of declaring its own. The payloads each used to carry a `toISOString()` copy,
+    // which meant a timezone fix had to be applied in N places or silently only
+    // half-land. Payloads must NOT declare `formatDate` themselves — a `function`
+    // declaration alongside this `const` is a redeclaration SyntaxError, which the
+    // prelude test asserts against.
+    const sections = [JXA_FORMAT_DATE_SOURCE];
+    if (args && args.length > 0) {
+      const quotedArgs = args.map((arg) => `"${escapeContent(arg)}"`).join(", ");
+      sections.push(`// Set up arguments\nconst argv = [${quotedArgs}];`);
+    }
+    sections.push(scriptContent);
+
+    // Read path — safe to retry on -1712.
+    const { stdout, stderr } = await runOmniJsPayload({
+      label: scriptPath,
+      sections,
       retryOnTimeout: true,
     });
-
-    // Clean up the temporary file
-    unlinkSync(tempFile);
 
     if (stderr) {
       console.error("Script stderr output:", stderr);
@@ -465,3 +470,86 @@ ${scriptContent}`;
     throw error;
   }
 }
+
+// --- writes ---------------------------------------------------------------------
+
+/** The shape every write script returns when it fails. */
+export interface WriteFailure {
+  success: false;
+  error: string;
+}
+
+let writeHelpersSource: string | null = null;
+
+/** `_writeHelpers.js`, read once: the functions every write payload shares. */
+function loadWriteHelpers(): string {
+  if (writeHelpersSource === null) {
+    writeHelpersSource = readFileSync(resolveScriptPath("@_writeHelpers.js"), "utf8");
+  }
+  return writeHelpersSource;
+}
+
+/**
+ * An error that escapes a payload reaches the JXA shim's `catch` as
+ * "Error: <message> undefined:1:436" — the JS error class and a source offset
+ * into the payload. Neither helps the caller; keep the message.
+ */
+export function normalizeOmniJsError(error: string): string {
+  return error.replace(/^Error: /, '').replace(/ undefined:\d+:\d+$/, '');
+}
+
+/**
+ * Run an OmniJS write script inside OmniFocus.
+ *
+ * `params` travel as ONE JSON document: the payload gets `argv[0]` as a string
+ * literal built with `jsStringLiteral`, so nothing the caller sends is ever
+ * spliced into source. The payload evaluates to a JSON string in the
+ * `{ success, ... }` / `{ success: false, error }` shape; whatever goes wrong
+ * — transport, a throw the payload didn't catch, unparseable output — comes
+ * back as `{ success: false, error }` rather than an exception, so callers
+ * see one shape.
+ *
+ * Never retried: a -1712 on a write may have partially applied (see the note
+ * at the top of this file), so a retry could duplicate a create.
+ */
+export async function executeOmniFocusWrite<T extends { success: boolean }>(
+  scriptPath: string,
+  params: unknown
+): Promise<T | WriteFailure> {
+  const start = Date.now();
+  let stdout: string;
+  try {
+    const scriptContent = readFileSync(resolveScriptPath(scriptPath), "utf8");
+    const sections = [
+      JXA_FORMAT_DATE_SOURCE,
+      loadWriteHelpers(),
+      `// Parameters: one JSON document, decoded by the payload\nconst argv = [${jsStringLiteral(JSON.stringify(params ?? {}))}];`,
+      scriptContent,
+    ];
+    const result = await runOmniJsPayload({ label: scriptPath, sections, retryOnTimeout: false });
+    stdout = result.stdout;
+    if (result.stderr) {
+      console.error("Script stderr output:", result.stderr);
+    }
+    _logger?.debug("scriptExecution", `OmniFocus write completed in ${Date.now() - start}ms`);
+  } catch (error: any) {
+    _logger?.error("scriptExecution", `OmniFocus write failed after ${Date.now() - start}ms: ${error}`);
+    console.error("Failed to execute OmniFocus write:", error);
+    return { success: false, error: error?.message || `Unknown error running ${scriptPath}` };
+  }
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return { success: false, error: `Failed to parse result: ${stdout}` };
+  }
+  if (parsed && typeof parsed === "object" && !("success" in parsed) && typeof parsed.error === "string") {
+    // The JXA shim's catch: the payload threw instead of returning a result.
+    return { success: false, error: normalizeOmniJsError(parsed.error) };
+  }
+  return parsed as T;
+}
+
+/** Internals exposed for tests only. */
+export const _testExports = { escapeContent, jsStringLiteral, buildOmniJsWrapper };
