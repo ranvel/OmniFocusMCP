@@ -37,7 +37,10 @@ export function describeReviewInterval(spec: ReviewIntervalSpec): string {
   return `${spec.steps} ${spec.unit}${spec.steps === 1 ? '' : 's'}`;
 }
 
-/** A spec validated and compiled for `applyReviewInterval` in `_writeHelpers.js`. */
+/**
+ * A spec validated and compiled for `applyReviewInterval` in `_writeHelpers.js`,
+ * which assigns the interval and reads it back.
+ */
 export interface CompiledReviewInterval {
   steps: number;
   unit: string;
@@ -56,37 +59,4 @@ export function compileReviewInterval(spec: ReviewIntervalSpec): CompiledReviewI
     );
   }
   return { steps: spec.steps, unit };
-}
-
-/**
- * AppleScript that sets `targetVar`'s (a project's) review interval through
- * Omni Automation and reads it back. Emit inside `tell front document`.
- *
- * AppleScript's id for a project is its root task's id (#77), so the item is
- * resolved with `Task.byIdentifier` and `.project` — as `repetitionRuleScript`
- * does.
- */
-export function reviewIntervalScript(targetVar: string, spec: ReviewIntervalSpec): string {
-  const unit = OMNIJS_UNIT[spec.unit];
-  if (!unit) {
-    throw new ReviewIntervalSpecError(
-      `Invalid review interval unit "${spec.unit}". Expected one of: day, week, month, year.`
-    );
-  }
-  if (!Number.isInteger(spec.steps) || spec.steps < 1) {
-    throw new ReviewIntervalSpecError(
-      `Invalid review interval steps "${spec.steps}". Expected a positive whole number.`
-    );
-  }
-
-  // Single-quoted JS only: it is spliced into a double-quoted AppleScript string.
-  const js =
-    `(function(){var t=Task.byIdentifier('" & _reviewId & "');` +
-    `var p=t?t.project:null;if(!p)throw new Error('review interval: project not found');` +
-    `var r=p.reviewInterval;r.steps=${spec.steps};r.unit='${unit}';p.reviewInterval=r;` +
-    `var b=p.reviewInterval;if(!b||b.steps!==${spec.steps}||b.unit!=='${unit}')` +
-    `throw new Error('review interval: did not read back as written');return 'ok';})()`;
-
-  return `set _reviewId to id of ${targetVar} as string
-        tell application "OmniFocus" to set _reviewResult to (evaluate javascript "${js}")`;
 }
