@@ -152,6 +152,46 @@ export function compileRecurrence(spec: RepetitionSpec): string {
 }
 
 /**
+ * A repetition spec compiled for the OmniJS write helpers (`applyRepetition`
+ * in `_writeHelpers.js`). Schedule type and anchor are the explicit
+ * constructor arguments Omni Automation takes since OmniFocus 4.7; a null
+ * `anchorKey` means "default from the item's dates at write time".
+ */
+export interface CompiledRepetition {
+  method: RepetitionMethodName;
+  recurrence: string;
+  schedule: 'Regularly' | 'FromCompletion';
+  anchorKey: string | null;
+  catchUp: boolean;
+  isProject: boolean;
+}
+
+/**
+ * Validate and compile a spec. Throws RepetitionSpecError on anything
+ * malformed, so an invalid repeat never degrades into "created without one".
+ */
+export function compileRepetitionSpec(
+  spec: RepetitionSpec,
+  options: { isProject: boolean }
+): CompiledRepetition {
+  const recurrence = compileRecurrence(spec);
+  if (options.isProject && spec.anchor === 'planned') {
+    throw new RepetitionSpecError(
+      'anchor "planned" is not available for projects (projects have no planned date). Use "defer" or "due".'
+    );
+  }
+  const fixedAnchor = spec.anchor ?? IMPLIED_ANCHOR[spec.method];
+  return {
+    method: spec.method,
+    recurrence,
+    schedule: SCHEDULE[spec.method],
+    anchorKey: fixedAnchor ? ANCHOR_KEY[fixedAnchor] : null,
+    catchUp: spec.method === 'fixed' && spec.catchUp === true,
+    isProject: options.isProject,
+  };
+}
+
+/**
  * AppleScript that sets `targetVar`'s repetition rule and leaves the anchor it
  * was stored with ('defer' | 'due' | 'planned') in the AppleScript variable
  * `_repetitionAnchor`. Emit inside `tell front document`, after the item's dates

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { generateAppleScript as addTask } from './addOmniFocusTask.js';
-import { generateAppleScript as addProject } from './addProject.js';
+import { buildAddProjectScriptParams } from './addProject.js';
 import { generateAppleScript as editItem } from './editItem.js';
 import { schema as addTaskSchema } from '../definitions/addOmniFocusTask.js';
 import { schema as addProjectSchema } from '../definitions/addProject.js';
@@ -27,15 +27,19 @@ describe('repetition rule on create (#116)', () => {
     expect(script).not.toContain('{repetition method:');
   });
 
-  it('add_project writes on newProject (projects can repeat)', () => {
-    const script = addProject({
+  it('add_project writes on the project (projects can repeat)', () => {
+    const params = buildAddProjectScriptParams({
       name: 'Monthly close',
       repeat: { method: 'fixed', unit: 'month', steps: 3 },
     });
-    expect(script).toContain('set _repetitionId to id of newProject as string');
-    expect(script).toContain("'FREQ=MONTHLY;INTERVAL=3'");
-    // Projects have no planned date, so the default chain must not consult one.
-    expect(script).not.toContain('x.plannedDate');
+    expect(params.repeat).toMatchObject({ recurrence: 'FREQ=MONTHLY;INTERVAL=3', schedule: 'Regularly', isProject: true });
+    const w = buildWorld();
+    const out = runWriteScript('addProject.js', params, w.globals);
+    expect(out.success).toBe(true);
+    const rule = w.projects[0].repetitionRule!;
+    expect(rule.ruleString).toBe('FREQ=MONTHLY;INTERVAL=3');
+    // Projects have no planned date, so the default chain must not land on one.
+    expect(String(rule.anchorDateKey)).toBe('DeferDate');
   });
 
   it('writes the rule after the dates, so a defaulted anchor sees them', () => {
@@ -52,7 +56,7 @@ describe('repetition rule on create (#116)', () => {
 
   it('emits no repetition statement when no repeat is requested', () => {
     expect(addTask({ name: 'One-shot' })).not.toContain('RepetitionRule');
-    expect(addProject({ name: 'One-shot' })).not.toContain('RepetitionRule');
+    expect(buildAddProjectScriptParams({ name: 'One-shot' })).not.toHaveProperty('repeat');
   });
 
   it('compiles weekday sets through', () => {

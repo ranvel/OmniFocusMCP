@@ -119,3 +119,126 @@ function isPastOccurrence(item, itemType) {
 function assertLiveOccurrence(item, itemType) {
   if (isPastOccurrence(item, itemType)) throw new Error(OCCURRENCE_GUARD_ERROR);
 }
+
+/**
+ * A folder by name ("Work") or by path ("Work/Engineering"): the leaf is
+ * matched by name and every ancestor named in the path must match walking up
+ * `.parent`. A component-less path ("", "/") names nothing and returns null,
+ * so the caller fails loudly instead of falling through to a default.
+ */
+function resolveFolderByPath(raw) {
+  var parts = splitPath(raw);
+  if (parts.length === 0) return null;
+  var leaf = parts[parts.length - 1];
+  if (parts.length === 1) return firstByName(flattenedFolders, leaf);
+  var fallback = null;
+  for (var i = 0; i < flattenedFolders.length; i++) {
+    var folder = flattenedFolders[i];
+    if (!namesEqual(folder.name, leaf)) continue;
+    if (ancestorsMatch(folder.parent, parts.slice(0, -1))) {
+      if (folder.name === leaf) return folder;
+      if (fallback === null) fallback = folder;
+    }
+  }
+  return fallback;
+}
+
+/**
+ * A project by name ("Community Outreach") or folder-qualified path
+ * ("Work/Community Outreach"); the components before the last are the folder
+ * ancestry, nearest first from the right.
+ */
+function resolveProjectByPath(raw) {
+  var parts = splitPath(raw);
+  if (parts.length === 0) return null;
+  var name = parts[parts.length - 1];
+  if (parts.length === 1) return firstByName(flattenedProjects, name);
+  var fallback = null;
+  for (var i = 0; i < flattenedProjects.length; i++) {
+    var project = flattenedProjects[i];
+    if (!namesEqual(project.name, name)) continue;
+    if (ancestorsMatch(project.parentFolder, parts.slice(0, -1))) {
+      if (project.name === name) return project;
+      if (fallback === null) fallback = project;
+    }
+  }
+  return fallback;
+}
+
+/** True when `folder` and its parents are named `names` from the right. */
+function ancestorsMatch(folder, names) {
+  var current = folder;
+  for (var i = names.length - 1; i >= 0; i--) {
+    if (!current || !namesEqual(current.name, names[i])) return false;
+    current = current.parent;
+  }
+  return true;
+}
+
+/**
+ * Set a repetition rule compiled on the TypeScript side (#116) and read it
+ * back. `compiled` is { recurrence, schedule, anchorKey|null, catchUp,
+ * isProject }: schedule and anchor are explicit constructor arguments in Omni
+ * Automation, which is why this is not the AppleScript record (that stored
+ * every fixed repeat as due-anchored). A null anchorKey means "default from
+ * the item's dates as they now stand", so call this after the date writes.
+ * Returns the anchor word actually stored: 'due' | 'defer' | 'planned'.
+ */
+function applyRepetition(item, compiled) {
+  if (!Task.AnchorDateKey) throw new Error('repetition: setting a repeat requires OmniFocus 4.7 or later');
+  var x = item.project ? item.project : item;
+  var K = Task.AnchorDateKey;
+  var S = Task.RepetitionScheduleType[compiled.schedule];
+  var a;
+  if (compiled.anchorKey) {
+    a = K[compiled.anchorKey];
+  } else if (compiled.isProject) {
+    a = x.dueDate ? K.DueDate : K.DeferDate;
+  } else {
+    a = x.dueDate ? K.DueDate : x.deferDate ? K.DeferDate : x.plannedDate ? K.PlannedDate : K.DeferDate;
+  }
+  x.repetitionRule = new Task.RepetitionRule(compiled.recurrence, null, S, a, compiled.catchUp);
+  var r = x.repetitionRule;
+  if (!r || r.ruleString !== compiled.recurrence || r.scheduleType !== S || r.anchorDateKey !== a ||
+      r.catchUpAutomatically !== compiled.catchUp) {
+    throw new Error('repetition: rule did not read back as written');
+  }
+  return a === K.DueDate ? 'due' : a === K.DeferDate ? 'defer' : 'planned';
+}
+
+/** The changedProperties label for a repetition write, naming the stored anchor. */
+function repetitionLabel(compiled, anchorWord) {
+  if (compiled.method === 'fixed') {
+    return 'repetition (fixed, from ' + anchorWord + ' date' + (compiled.catchUp ? ', catch up' : '') + ')';
+  }
+  return compiled.method === 'start-after-completion'
+    ? 'repetition (start after completion)'
+    : 'repetition (due after completion)';
+}
+
+/**
+ * Set a project's review interval (#139) and read it back. The getter returns
+ * a copy and the setter accepts only a Project.ReviewInterval, so the copy is
+ * mutated and assigned back. `unit` is already plural ('weeks').
+ */
+function applyReviewInterval(project, spec) {
+  var r = project.reviewInterval;
+  r.steps = spec.steps;
+  r.unit = spec.unit;
+  project.reviewInterval = r;
+  var b = project.reviewInterval;
+  if (!b || b.steps !== spec.steps || b.unit !== spec.unit) {
+    throw new Error('review interval: did not read back as written');
+  }
+}
+
+/** Attach each named tag, creating missing ones; a tag that fails is skipped. */
+function addTagsByName(item, names) {
+  for (var i = 0; i < names.length; i++) {
+    try {
+      item.addTag(ensureTag(names[i]));
+    } catch (e) {
+      // Could not create or add the tag; the AppleScript write swallowed this too.
+    }
+  }
+}

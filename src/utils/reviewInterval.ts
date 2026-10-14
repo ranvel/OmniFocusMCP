@@ -37,6 +37,27 @@ export function describeReviewInterval(spec: ReviewIntervalSpec): string {
   return `${spec.steps} ${spec.unit}${spec.steps === 1 ? '' : 's'}`;
 }
 
+/** A spec validated and compiled for `applyReviewInterval` in `_writeHelpers.js`. */
+export interface CompiledReviewInterval {
+  steps: number;
+  unit: string;
+}
+
+export function compileReviewInterval(spec: ReviewIntervalSpec): CompiledReviewInterval {
+  const unit = OMNIJS_UNIT[spec.unit];
+  if (!unit) {
+    throw new ReviewIntervalSpecError(
+      `Invalid review interval unit "${spec.unit}". Expected one of: day, week, month, year.`
+    );
+  }
+  if (!Number.isInteger(spec.steps) || spec.steps < 1) {
+    throw new ReviewIntervalSpecError(
+      `Invalid review interval steps "${spec.steps}". Expected a positive whole number.`
+    );
+  }
+  return { steps: spec.steps, unit };
+}
+
 /**
  * AppleScript that sets `targetVar`'s (a project's) review interval through
  * Omni Automation and reads it back. Emit inside `tell front document`.

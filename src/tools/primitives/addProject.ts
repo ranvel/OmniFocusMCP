@@ -1,15 +1,7 @@
-import { writeFileSync, unlinkSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
-import { createDateOutsideTellBlock } from '../../utils/dateFormatting.js';
-import {
-  escapeAppleScriptString,
-  escapeForJsonInAppleScript,
-  generateFolderLookupScript,
-  JSON_ESCAPE_HANDLER,
-} from '../../utils/appleScriptHelpers.js';
-import { repetitionRuleScript, type RepetitionSpec } from '../../utils/repetitionRule.js';
-import { runOsascriptFile } from '../../utils/scriptExecution.js';
+import { toDateParts, type DateParts } from '../../utils/dateFormatting.js';
+import { compileRepetitionSpec, type CompiledRepetition, type RepetitionSpec } from '../../utils/repetitionRule.js';
+import { executeOmniFocusWrite } from '../../utils/scriptExecution.js';
+import { flattenName } from '../../utils/writeParams.js';
 
 // Interface for project creation parameters
 export interface AddProjectParams {
@@ -25,161 +17,54 @@ export interface AddProjectParams {
   repeat?: RepetitionSpec; // Repetition rule (#116)
 }
 
-/**
- * Generate pure AppleScript for project creation
- */
-export function generateAppleScript(params: AddProjectParams): string {
-  // Sanitize and prepare parameters for AppleScript
-  const name = escapeAppleScriptString(params.name);
-  const note = params.note ? escapeAppleScriptString(params.note, { preserveNewlines: true }) : '';
-  const dueDate = params.dueDate || '';
-  const deferDate = params.deferDate || '';
-  const flagged = params.flagged === true;
-  const estimatedMinutes = params.estimatedMinutes?.toString() || '';
-  const tags = params.tags || [];
-  const sequential = params.sequential === true;
+/** What addProject.js receives. */
+export interface AddProjectScriptParams {
+  name: string;
+  note?: string;
+  dueDate?: DateParts;
+  deferDate?: DateParts;
+  flagged?: boolean;
+  estimatedMinutes?: number;
+  tags?: string[];
+  folderName?: string;
+  sequential: boolean;
+  repeat?: CompiledRepetition;
+}
 
-  // Generate date constructions outside tell blocks
-  let datePreScript = '';
-  let dueDateVar = '';
-  let deferDateVar = '';
+interface AddProjectScriptResult {
+  success: true;
+  projectId: string;
+}
 
-  if (dueDate) {
-    dueDateVar = `dueDate${Math.random().toString(36).substr(2, 9)}`;
-    datePreScript += createDateOutsideTellBlock(dueDate, dueDateVar) + '\n\n';
-  }
-
-  if (deferDate) {
-    deferDateVar = `deferDate${Math.random().toString(36).substr(2, 9)}`;
-    datePreScript += createDateOutsideTellBlock(deferDate, deferDateVar) + '\n\n';
-  }
-
-  // Build project creation block — either at root or in a folder
-  let projectCreationBlock: string;
-  if (params.folderName) {
-    // escapeForJsonInAppleScript, not escapeAppleScriptString: this name lands
-    // inside a JSON payload, where an AppleScript-escaped quote re-materializes
-    // raw and corrupts the result (#103).
-    const errorJson = `{\\\"success\\\":false,\\\"error\\\":\\\"Folder not found: ${escapeForJsonInAppleScript(params.folderName)}\\\"}`;
-    const folderLookup = generateFolderLookupScript(params.folderName, 'theFolder', errorJson);
-    projectCreationBlock = `
-        -- Find the folder (supports nested paths like "Work/Engineering")
-        ${folderLookup}
-        set newProject to make new project with properties {name:"${name}"} at end of projects of theFolder`;
-  } else {
-    projectCreationBlock = `
-        -- Create project at the root level
-        set newProject to make new project with properties {name:"${name}"}`;
-  }
-
-  // Construct AppleScript with error handling
-  let script = JSON_ESCAPE_HANDLER + datePreScript + `
-  try
-    tell application "OmniFocus"
-      tell front document
-        ${projectCreationBlock}
-
-        -- Set project properties
-        ${note ? `set note of newProject to "${note}"` : ''}
-        ${dueDate ? `
-          -- Set due date
-          set due date of newProject to ` + dueDateVar : ''}
-        ${deferDate ? `
-          -- Set defer date
-          set defer date of newProject to ` + deferDateVar : ''}
-        ${flagged ? `set flagged of newProject to true` : ''}
-        ${estimatedMinutes ? `set estimated minutes of newProject to ${estimatedMinutes}` : ''}
-        ${`set sequential of newProject to ${sequential}`}
-        ${params.repeat ? `
-          -- Set the repetition rule (#116) after the dates; see repetitionRuleScript.
-          ${repetitionRuleScript('newProject', params.repeat, { isProject: true })}` : ''}
-
-        -- Get the project ID
-        set projectId to id of newProject as string
-
-        -- Add tags if provided
-        ${tags.length > 0 ? tags.map(tag => {
-          const sanitizedTag = escapeAppleScriptString(tag);
-          return `
-          try
-            set theTag to first flattened tag where name = "${sanitizedTag}"
-            add theTag to tags of newProject
-          on error
-            -- Tag might not exist, try to create it
-            try
-              set theTag to make new tag with properties {name:"${sanitizedTag}"}
-              add theTag to tags of newProject
-            on error
-              -- Could not create or add tag
-            end try
-          end try`;
-        }).join('\n') : ''}
-
-        -- Return success with project ID. The name is deliberately NOT echoed:
-        -- the caller already knows it, and splicing it into hand-built JSON is
-        -- how quotes in a name corrupted the payload (#103).
-        return "{\\\"success\\\":true,\\\"projectId\\\":\\"" & projectId & "\\"}"
-      end tell
-    end tell
-  on error errorMessage
-    return "{\\\"success\\\":false,\\\"error\\\":\\"" & my jsonEscape(errorMessage) & "\\"}"
-  end try
-  `;
-
-  return script;
+/** Translate the tool's parameters into the script's. Throws on a bad date or repeat. */
+export function buildAddProjectScriptParams(params: AddProjectParams): AddProjectScriptParams {
+  const out: AddProjectScriptParams = {
+    name: flattenName(params.name),
+    sequential: params.sequential === true,
+  };
+  if (params.note) out.note = params.note;
+  if (params.dueDate) out.dueDate = toDateParts(params.dueDate);
+  if (params.deferDate) out.deferDate = toDateParts(params.deferDate);
+  if (params.flagged === true) out.flagged = true;
+  if (params.estimatedMinutes) out.estimatedMinutes = params.estimatedMinutes;
+  if (params.tags && params.tags.length > 0) out.tags = params.tags.map(flattenName);
+  if (params.folderName) out.folderName = params.folderName;
+  if (params.repeat) out.repeat = compileRepetitionSpec(params.repeat, { isProject: true });
+  return out;
 }
 
 /**
  * Add a project to OmniFocus
  */
 export async function addProject(params: AddProjectParams): Promise<{success: boolean, projectId?: string, error?: string}> {
-  let tempFile: string | undefined;
-
   try {
-    // Generate AppleScript
-    const script = generateAppleScript(params);
-
-    console.error("Executing AppleScript via temp file...");
-
-    // Write to a temporary AppleScript file to avoid shell escaping issues
-    tempFile = join(tmpdir(), `add_project_${crypto.randomUUID()}.applescript`);
-    writeFileSync(tempFile, script, { encoding: 'utf8' });
-
-    // Execute AppleScript from file
-    const { stdout, stderr } = await runOsascriptFile(tempFile);
-
-    // Clean up temp file
-    try { unlinkSync(tempFile); } catch {}
-
-    if (stderr) {
-      console.error("AppleScript stderr:", stderr);
+    const scriptParams = buildAddProjectScriptParams(params);
+    const result = await executeOmniFocusWrite<AddProjectScriptResult>('@addProject.js', scriptParams);
+    if (!result.success) {
+      return { success: false, error: result.error };
     }
-
-    console.error("AppleScript stdout:", stdout);
-
-    // Parse the result
-    try {
-      const result = JSON.parse(stdout);
-
-      // Return the result
-      return {
-        success: result.success,
-        projectId: result.projectId,
-        error: result.error
-      };
-    } catch (parseError) {
-      console.error("Error parsing AppleScript result:", parseError);
-      return {
-        success: false,
-        error: `Failed to parse result: ${stdout}`
-      };
-    }
+    return { success: true, projectId: result.projectId };
   } catch (error: any) {
-    // Clean up temp file if it exists
-    if (tempFile) {
-      try { unlinkSync(tempFile); } catch {}
-    }
-
     console.error("Error in addProject:", error);
     return {
       success: false,

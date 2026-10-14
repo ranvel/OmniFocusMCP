@@ -88,3 +88,33 @@ describe('createDateOutsideTellBlock', () => {
     });
   });
 });
+
+describe('toDateParts (OmniJS writes)', () => {
+  it('date-only string uses the local calendar day at midnight, not UTC', async () => {
+    const { toDateParts } = await import('./dateFormatting.js');
+    expect(toDateParts('2026-04-10')).toEqual({ y: 2026, m: 4, d: 10, h: 0, mi: 0, s: 0 });
+  });
+
+  it('datetime string preserves the specified time', async () => {
+    const { toDateParts } = await import('./dateFormatting.js');
+    expect(toDateParts('2026-04-10T17:30:15')).toEqual({ y: 2026, m: 4, d: 10, h: 17, mi: 30, s: 15 });
+  });
+
+  it('throws on invalid date string', async () => {
+    const { toDateParts } = await import('./dateFormatting.js');
+    expect(() => toDateParts('not-a-date')).toThrow('Invalid date string: not-a-date');
+  });
+
+  it('targets a short month without depending on today (#91)', async () => {
+    const { toDateParts } = await import('./dateFormatting.js');
+    expect(toDateParts('2026-11-01')).toMatchObject({ m: 11, d: 1 });
+    expect(toDateParts('2026-02-28')).toMatchObject({ m: 2, d: 28 });
+  });
+
+  it('editDateParam distinguishes untouched, cleared and set', async () => {
+    const { editDateParam } = await import('./dateFormatting.js');
+    expect(editDateParam(undefined)).toBeUndefined();
+    expect(editDateParam('')).toBeNull();
+    expect(editDateParam('2026-04-10')).toEqual({ y: 2026, m: 4, d: 10, h: 0, mi: 0, s: 0 });
+  });
+});

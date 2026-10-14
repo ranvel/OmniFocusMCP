@@ -26,6 +26,46 @@ export function parseInputDate(isoDateString: string): Date {
   return new Date(normalized);
 }
 
+/**
+ * A local wall-clock date as components, the form the OmniJS write scripts
+ * take (`dateFromParts` in `_writeHelpers.js`). Sending components rather than
+ * an ISO string keeps the calendar day the caller wrote: a string parsed with
+ * `new Date()` inside OmniFocus would be read as UTC midnight (#91).
+ */
+export interface DateParts {
+  y: number;
+  m: number;
+  d: number;
+  h: number;
+  mi: number;
+  s: number;
+}
+
+export function toDateParts(isoDateString: string): DateParts {
+  const date = parseInputDate(isoDateString);
+  if (isNaN(date.getTime())) {
+    throw new Error(`Invalid date string: ${isoDateString}`);
+  }
+  return {
+    y: date.getFullYear(),
+    m: date.getMonth() + 1,
+    d: date.getDate(),
+    h: date.getHours(),
+    mi: date.getMinutes(),
+    s: date.getSeconds(),
+  };
+}
+
+/**
+ * An edit's date field: `undefined` leaves the date alone, `''` clears it
+ * (null in the payload), anything else is parsed.
+ */
+export function editDateParam(value: string | undefined): DateParts | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === '') return null;
+  return toDateParts(value);
+}
+
 export function createDateOutsideTellBlock(isoDateString: string, varName: string): string {
   const date = parseInputDate(isoDateString);
 
