@@ -263,7 +263,9 @@ The two template resources support listing all available values and autocompleti
 
 ## How It Works
 
-The server communicates with OmniFocus through `osascript`, using JXA (JavaScript for Automation) and OmniFocus's embedded Omni Automation (OmniJS) where appropriate. It's built on the official [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) and talks to clients over stdio.
+The server communicates with OmniFocus through `osascript`. Every operation, reads and writes alike, is an Omni Automation (OmniJS) script evaluated inside OmniFocus, carried there by a small JXA (JavaScript for Automation) shim over AppleEvents. Writes send their parameters as one JSON document and get one JSON document back, so nothing a caller types is ever spliced into script source; the only AppleScript left is the cheap liveness probe. It's built on the official [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) and talks to clients over stdio.
+
+Project ids are accepted in either form OmniFocus exposes — the project's own id or its root task's id, which is what AppleScript reported and what queries return — and results keep reporting the root task's id. Names passed to a write (project, folder, tag, parent task) match case-insensitively, as the AppleScript lookups did.
 
 ### Shared daemon
 
