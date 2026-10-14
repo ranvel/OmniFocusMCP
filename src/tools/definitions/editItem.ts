@@ -19,7 +19,7 @@ export const schema = z.object({
   newRepeat: repeatShape.nullable().optional().describe("New repetition rule; null clears it"),
 
   // Task-specific fields
-  newStatus: z.enum(['incomplete', 'completed', 'dropped', 'skipped']).optional().describe("New task status. 'skipped' (repeating tasks only) completes the occurrence to trigger the next repeat, then drops the instance"),
+  newStatus: z.enum(['incomplete', 'completed', 'dropped', 'skipped']).optional().describe("New task status. 'skipped' (repeating tasks only) drops this occurrence and schedules the next repeat, like OmniFocus's Skip This Occurrence"),
   addTags: z.array(z.string()).optional().describe("Tags to add"),
   removeTags: z.array(z.string()).optional().describe("Tags to remove"),
   replaceTags: z.array(z.string()).optional().describe("Replace all tags with these"),

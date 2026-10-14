@@ -159,6 +159,8 @@ export class FakeTask {
       return;
     }
     this.dropDate = this.world.now();
+    // Dropping a project's root task drops the project (observed live).
+    if (this.project) this.project.status = PSTATUS.Dropped;
   }
 }
 

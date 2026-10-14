@@ -259,3 +259,143 @@ function placementOf(task, requestedParent, requestedProject) {
     return requestedProject ? 'project' : 'inbox';
   }
 }
+
+/** Detach each named tag that exists; names that match nothing are ignored. */
+function removeTagsByName(item, names) {
+  for (var i = 0; i < names.length; i++) {
+    var tag = firstByName(flattenedTags, names[i]);
+    if (tag) item.removeTag(tag);
+  }
+}
+
+/**
+ * Nest and/or reorder a task (#138). `spec` is { parentId?, position? }:
+ * - parentId names the new parent task; "" means the top level of the task's
+ *   containing project, or the inbox when it has no project. Omitted = stay.
+ * - position is 'beginning' | 'end' | { before: id } | { after: id }; a
+ *   before/after task must share the target parent.
+ * A parent that is the task itself or one of its descendants is refused; so
+ * is a project id (newProjectName is the project move). The move is read back
+ * — parent and index — and anything that didn't land as asked throws.
+ * Returns the parent part of the changedProperties label ('' when no parent
+ * was requested).
+ */
+function moveTask(t, spec) {
+  if (t.project) throw new Error('move: projects cannot be nested or reordered here');
+  var hasParent = spec.parentId !== undefined && spec.parentId !== null;
+
+  // P is the target parent task, or null for the top level of the inbox. A
+  // project's top level is its root task, so one representation covers both.
+  var P;
+  if (!hasParent) {
+    P = t.parent;
+  } else if (spec.parentId === '') {
+    P = t.containingProject ? t.containingProject.task : null;
+  } else {
+    P = Task.byIdentifier(spec.parentId);
+    if (!P) throw new Error('move: parent task not found: ' + spec.parentId);
+    if (P.project) throw new Error('move: parent is a project; use newProjectName to move into a project');
+    for (var a = P; a; a = a.parent) {
+      if (a === t) throw new Error('move: cannot nest a task under itself or one of its own subtasks');
+    }
+  }
+
+  function kids() {
+    if (P) return P.children;
+    var r = [];
+    for (var i = 0; i < inbox.length; i++) r.push(inbox[i]);
+    return r;
+  }
+  function idx(x) {
+    var k = kids();
+    for (var i = 0; i < k.length; i++) if (k[i] === x) return i;
+    return -1;
+  }
+
+  var pos = spec.position === undefined || spec.position === null ? 'end' : spec.position;
+  var where = typeof pos === 'object' ? ('before' in pos ? 'before' : 'after') : pos;
+  var sibling = typeof pos === 'object' ? pos[where] : null;
+  var S = null;
+  var L;
+  if (sibling !== null) {
+    S = Task.byIdentifier(sibling);
+    if (!S || S.project) throw new Error('move: ' + where + ' task not found: ' + sibling);
+    if (S === t) throw new Error('move: a task cannot be placed ' + where + ' itself');
+    if (idx(S) < 0) {
+      throw new Error('move: ' + where + ' task ' + sibling +
+        ' is not in the target container; it must share the parent the task is moving to');
+    }
+    L = S[where];
+  } else {
+    var end = where === 'beginning' ? 'beginning' : 'ending';
+    L = P ? P[end] : inbox[end];
+  }
+
+  moveTasks([t], L);
+
+  // Read-back: the parent, then the index the position asked for.
+  var np = t.parent;
+  if (np !== P || (P === null && !t.inInbox)) throw new Error('move: task did not land under the requested parent');
+  var landed = S !== null
+    ? (where === 'before' ? idx(t) === idx(S) - 1 : idx(t) === idx(S) + 1)
+    : where === 'beginning' ? idx(t) === 0 : idx(t) === kids().length - 1;
+  if (!landed) throw new Error('move: task did not land at the requested position');
+
+  if (!hasParent) return '';
+  return P === null ? 'parent (inbox)' : P.project ? 'parent (project root)' : 'parent (moved under ' + P.name + ')';
+}
+
+/** The changedProperties text for a position. */
+function positionLabel(position) {
+  if (position === 'beginning' || position === 'end') return 'position (' + position + ')';
+  return 'before' in position ? 'position (before ' + position.before + ')' : 'position (after ' + position.after + ')';
+}
+
+/** The changedProperties text for a move: the parent part, the position part, or both. */
+function moveLabel(spec, parentLabel) {
+  var hasParent = spec.parentId !== undefined && spec.parentId !== null;
+  var posText = spec.position !== undefined && spec.position !== null ? positionLabel(spec.position) : '';
+  return hasParent && posText ? parentLabel + ', ' + posText : hasParent ? parentLabel : posText;
+}
+
+/**
+ * Change a task's status. For a repeating task, markComplete() and drop(false)
+ * both resolve this occurrence and schedule the next — drop(false) is
+ * OmniFocus's "Skip This Occurrence", which is what `skipped` means. Returns
+ * the changedProperties label.
+ */
+function setTaskStatus(task, status) {
+  if (status === 'completed') { task.markComplete(); return 'status (completed)'; }
+  if (status === 'dropped') { task.drop(false); return 'status (dropped)'; }
+  if (status === 'incomplete') { task.markIncomplete(); return 'status (incomplete)'; }
+  if (status === 'skipped') {
+    if (!task.repetitionRule) throw new Error('Cannot skip a non-repeating task. The task must have a repetition rule.');
+    task.drop(false);
+    return 'status (skipped)';
+  }
+  throw new Error('Unknown task status: ' + status);
+}
+
+/**
+ * Change a project's status. Completing and dropping go through the same
+ * operations the AppleScript verbs used, so a repeating project resolves this
+ * occurrence and advances rather than ending the chain.
+ */
+function setProjectStatus(project, status) {
+  if (status === 'completed') project.markComplete();
+  else if (status === 'dropped') project.task.drop(false);
+  else if (status === 'active') project.status = Project.Status.Active;
+  else if (status === 'onHold') project.status = Project.Status.OnHold;
+  else throw new Error('Unknown project status: ' + status);
+  return 'status (' + status + ')';
+}
+
+/**
+ * Mark a project reviewed now. Omni Automation has no markReviewed(); setting
+ * the last review date and clearing the next lets OmniFocus schedule the next
+ * review from the interval, exactly as the AppleScript write did.
+ */
+function markProjectReviewed(project) {
+  project.lastReviewDate = new Date();
+  project.nextReviewDate = null;
+}

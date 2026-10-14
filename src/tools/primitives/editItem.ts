@@ -1,27 +1,14 @@
-import { runOsascriptFile } from '../../utils/scriptExecution.js';
-import { writeFileSync, unlinkSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
-import { generateDateAssignmentV2 } from '../../utils/dateFormatting.js';
+import { editDateParam, type DateParts } from '../../utils/dateFormatting.js';
+import { compileRepetitionSpec, type CompiledRepetition, type RepetitionSpec } from '../../utils/repetitionRule.js';
+import { type TaskPosition } from '../../utils/taskMove.js';
 import {
-  escapeAppleScriptString,
-  escapeForJsonInAppleScript,
-  generateFolderLookupScript,
-  generateProjectLookupScript,
-  generateOccurrenceGuardScript,
-  JSON_ESCAPE_HANDLER,
-} from '../../utils/appleScriptHelpers.js';
-import {
-  repetitionRuleScript,
-  repetitionChangeLabel,
-  type RepetitionSpec,
-} from '../../utils/repetitionRule.js';
-import { taskMoveScript, type TaskPosition } from '../../utils/taskMove.js';
-import {
-  reviewIntervalScript,
+  compileReviewInterval,
   describeReviewInterval,
+  type CompiledReviewInterval,
   type ReviewIntervalSpec,
 } from '../../utils/reviewInterval.js';
+import { executeOmniFocusWrite } from '../../utils/scriptExecution.js';
+import { flattenName } from '../../utils/writeParams.js';
 
 // Status options for tasks and projects
 type TaskStatus = 'incomplete' | 'completed' | 'dropped' | 'skipped';
@@ -84,478 +71,101 @@ export function validateEditParams(params: EditItemParams): string | null {
 }
 
 /**
- * Generate pure AppleScript for item editing with dates constructed outside tell blocks
+ * What editItem.js receives. Dates are local wall-clock parts (`null` clears);
+ * the repeat and review interval are compiled; the move is one object.
  */
-export function generateAppleScript(params: EditItemParams): string {
-  const invalid = validateEditParams(params);
-  if (invalid) throw new EditItemParamError(invalid);
+export interface EditItemScriptParams {
+  id?: string;
+  name?: string;
+  itemType: 'task' | 'project';
+  allowPastOccurrence: boolean;
+  newName?: string;
+  newNote?: string;
+  newDueDate?: DateParts | null;
+  newDeferDate?: DateParts | null;
+  newPlannedDate?: DateParts | null;
+  newFlagged?: boolean;
+  newEstimatedMinutes?: number;
+  newRepeat?: CompiledRepetition | null;
+  addTags?: string[];
+  removeTags?: string[];
+  replaceTags?: string[];
+  newStatus?: TaskStatus;
+  newProjectName?: string;
+  move?: { parentId?: string; position?: TaskPosition };
+  newSequential?: boolean;
+  newProjectStatus?: ProjectStatus;
+  newReviewInterval?: CompiledReviewInterval;
+  /** The interval as query_omnifocus renders it, for the changedProperties label. */
+  reviewIntervalLabel?: string;
+  markReviewed?: boolean;
+  newFolderName?: string;
+}
 
-  // Sanitize and prepare parameters for AppleScript
-  const id = params.id ? escapeAppleScriptString(params.id) : '';
-  const name = params.name ? escapeAppleScriptString(params.name) : '';
-  const itemType = params.itemType;
-  
-  // Verify we have at least one identifier
-  if (!id && !name) {
-    return `return "{\\\"success\\\":false,\\\"error\\\":\\\"Either id or name must be provided\\\"}"`;
-  }
-  
-  // Collect all date constructions that need to happen outside tell blocks
-  const datePreScripts: string[] = [];
-  const dateAssignments: { [key: string]: string } = {};
-  
-  // Process due date if provided
-  const dueDateParts = generateDateAssignmentV2('foundItem', 'due date', params.newDueDate);
-  if (dueDateParts) {
-    if (dueDateParts.preScript) {
-      datePreScripts.push(dueDateParts.preScript);
-    }
-    dateAssignments['due date'] = dueDateParts.assignmentScript;
-  }
-  
-  // Process defer date if provided
-  const deferDateParts = generateDateAssignmentV2('foundItem', 'defer date', params.newDeferDate);
-  if (deferDateParts) {
-    if (deferDateParts.preScript) {
-      datePreScripts.push(deferDateParts.preScript);
-    }
-    dateAssignments['defer date'] = deferDateParts.assignmentScript;
-  }
-
-  // Process planned date if provided (tasks only)
-  const plannedDateParts = generateDateAssignmentV2('foundItem', 'planned date', params.newPlannedDate);
-  if (plannedDateParts) {
-    if (plannedDateParts.preScript) {
-      datePreScripts.push(plannedDateParts.preScript);
-    }
-    dateAssignments['planned date'] = plannedDateParts.assignmentScript;
-  }
-  
-  // Build the complete script
-  let script = JSON_ESCAPE_HANDLER;
-
-  // Add date constructions outside tell blocks
-  if (datePreScripts.length > 0) {
-    script += datePreScripts.join('\n') + '\n\n';
-  }
-  
-  // Start the main script
-  script += `try
-  tell application "OmniFocus"
-    tell front document
-      -- Find the item to edit
-      set foundItem to missing value
-`;
-  
-  // Add ID search if provided
-  if (id) {
-    if (itemType === 'task') {
-      script += `
-      -- Find task by ID (flattened tasks includes inbox tasks and returns direct references)
-      try
-        set foundItem to first flattened task whose id is "${id}"
-      end try
-`;
-    } else {
-      script += `
-      -- Find project by ID
-      try
-        set foundItem to first flattened project whose id is "${id}"
-      end try
-`;
-    }
-  }
-  
-  // Add name search if provided (and no ID or as fallback)
-  if (!id && name) {
-    if (itemType === 'task') {
-      script += `
-      -- Find task by name (flattened tasks includes inbox tasks)
-      try
-        set foundItem to first flattened task whose name is "${name}"
-      end try
-`;
-    } else {
-      script += `
-      -- Find project by name
-      try
-        set foundItem to first flattened project whose name is "${name}"
-      end try
-`;
-    }
-  } else if (id && name) {
-    if (itemType === 'task') {
-      script += `
-      -- If ID search failed, try to find by name as fallback
-      if foundItem is missing value then
-        try
-          set foundItem to first flattened task whose name is "${name}"
-        end try
-      end if
-`;
-    } else {
-      script += `
-      -- If ID search failed, try to find project by name as fallback
-      if foundItem is missing value then
-        try
-          set foundItem to first flattened project whose name is "${name}"
-        end try
-      end if
-`;
-    }
-  }
-  
-  // Add the item editing logic
-  script += `
-      -- If we found the item, edit it
-      if foundItem is not missing value then
-        set itemName to name of foundItem
-        set itemId to id of foundItem as string
-        set changedProperties to {}
-        ${params.allowPastOccurrence ? '' : generateOccurrenceGuardScript('foundItem', `{\\"success\\":false,\\"error\\":\\"This is a completed occurrence of a repeating item, not a duplicate. Mutating it can cascade through the live repeat chain. Query without includeCompleted to get the live occurrence, or pass allowPastOccurrence: true if you really mean this one.\\"}`)}
-`;
-  
-  // Common property updates for both tasks and projects
-  if (params.newName !== undefined) {
-    script += `
-        -- Update name
-        set name of foundItem to "${escapeAppleScriptString(params.newName)}"
-        set end of changedProperties to "name"
-`;
-  }
-  
-  if (params.newNote !== undefined) {
-    script += `
-        -- Update note
-        set note of foundItem to "${escapeAppleScriptString(params.newNote, { preserveNewlines: true })}"
-        set end of changedProperties to "note"
-`;
-  }
-  
-  // Add date assignments (using pre-constructed dates)
-  if (dateAssignments['due date']) {
-    script += `
-        -- Update due date
-        ${dateAssignments['due date']}
-        set end of changedProperties to "due date"
-`;
-  }
-  
-  if (dateAssignments['defer date']) {
-    script += `
-        -- Update defer date
-        ${dateAssignments['defer date']}
-        set end of changedProperties to "defer date"
-`;
-  }
-
-  if (dateAssignments['planned date']) {
-    script += `
-        -- Update planned date
-        ${dateAssignments['planned date']}
-        set end of changedProperties to "planned date"
-`;
-  }
-
-  if (params.newFlagged !== undefined) {
-    script += `
-        -- Update flagged status
-        set flagged of foundItem to ${params.newFlagged}
-        set end of changedProperties to "flagged"
-`;
-  }
-  
-  if (params.newEstimatedMinutes !== undefined) {
-    script += `
-        -- Update estimated minutes
-        set estimated minutes of foundItem to ${params.newEstimatedMinutes}
-        set end of changedProperties to "estimated minutes"
-`;
-  }
-
-  // Repetition rule (#116). `null` clears — chosen over the dates' empty-string
-  // convention because the value is an object, so there is no empty form of it.
-  // Applies to tasks and projects alike; both can repeat.
-  if (params.newRepeat !== undefined) {
-    if (params.newRepeat === null) {
-      script += `
-        -- Clear the repetition rule
-        set repetition rule of foundItem to missing value
-        set end of changedProperties to "repetition (cleared)"
-`;
-    } else {
-      script += `
-        -- Update the repetition rule through Omni Automation, after the date
-        -- edits above, so a defaulted fixed anchor sees the dates as they now
-        -- stand. See repetitionRuleScript for why not the AppleScript record.
-        ${repetitionRuleScript('foundItem', params.newRepeat, { isProject: itemType === 'project' })}
-        set end of changedProperties to ${repetitionChangeLabel(params.newRepeat)}
-`;
-    }
-  }
-
-
-  // Tag operations apply to both tasks and projects (OmniFocus supports tags on
-  // projects too). Kept in the common section so project edits aren't a no-op.
-  if (params.replaceTags && params.replaceTags.length > 0) {
-    const tagsList = params.replaceTags.map(tag => `"${escapeAppleScriptString(tag)}"`).join(", ");
-    script += `
-        -- Replace all tags
-        set tagNames to {${tagsList}}
-        set existingTags to tags of foundItem
-
-        -- First clear all existing tags
-        repeat with existingTag in existingTags
-          remove existingTag from tags of foundItem
-        end repeat
-
-        -- Then add new tags
-        repeat with tagName in tagNames
-          set tagObj to missing value
-          try
-            set tagObj to first flattened tag where name = (tagName as string)
-          on error
-            -- Tag doesn't exist, create it
-            set tagObj to make new tag with properties {name:(tagName as string)}
-          end try
-          if tagObj is not missing value then
-            add tagObj to tags of foundItem
-          end if
-        end repeat
-        set end of changedProperties to "tags (replaced)"
-`;
-  } else {
-    // Add tags if specified
-    if (params.addTags && params.addTags.length > 0) {
-      const tagsList = params.addTags.map(tag => `"${escapeAppleScriptString(tag)}"`).join(", ");
-      script += `
-        -- Add tags
-        set tagNames to {${tagsList}}
-        repeat with tagName in tagNames
-          set tagObj to missing value
-          try
-            set tagObj to first flattened tag where name = (tagName as string)
-          on error
-            -- Tag doesn't exist, create it
-            set tagObj to make new tag with properties {name:(tagName as string)}
-          end try
-          if tagObj is not missing value then
-            add tagObj to tags of foundItem
-          end if
-        end repeat
-        set end of changedProperties to "tags (added)"
-`;
-    }
-
-    // Remove tags if specified
-    if (params.removeTags && params.removeTags.length > 0) {
-      const tagsList = params.removeTags.map(tag => `"${escapeAppleScriptString(tag)}"`).join(", ");
-      script += `
-        -- Remove tags
-        set tagNames to {${tagsList}}
-        repeat with tagName in tagNames
-          try
-            set tagObj to first flattened tag where name = (tagName as string)
-            remove tagObj from tags of foundItem
-          end try
-        end repeat
-        set end of changedProperties to "tags (removed)"
-`;
-    }
-  }
-
-  // Task-specific updates
-  if (itemType === 'task') {
-    // Update task status
-    if (params.newStatus !== undefined) {
-      if (params.newStatus === 'completed') {
-        script += `
-        -- Mark task as completed (works reliably for all task types including inbox tasks)
-        mark complete foundItem
-        set end of changedProperties to "status (completed)"
-`;
-      } else if (params.newStatus === 'dropped') {
-        script += `
-        -- Mark task as dropped
-        mark dropped foundItem
-        set end of changedProperties to "status (dropped)"
-`;
-      } else if (params.newStatus === 'skipped') {
-        script += `
-        -- Skip repeating task: complete it to fire the next repeat, then drop the completed instance
-        if repetition rule of foundItem is missing value then
-          return "{\\\"success\\\":false,\\\"error\\\":\\\"Cannot skip a non-repeating task. The task must have a repetition rule.\\\"}"
-        end if
-
-        -- Store the ID of the current instance before completing
-        set skippedTaskId to id of foundItem as string
-
-        -- Complete the task to trigger the next repetition
-        mark complete foundItem
-
-        -- Now find and drop the completed instance by its original ID
-        try
-          set completedTask to first flattened task whose id is skippedTaskId
-          set dropped of completedTask to true
-          set end of changedProperties to "status (skipped)"
-        on error
-          -- The completed instance may have moved; still report success since repeat was triggered
-          set end of changedProperties to "status (skipped - completed instance not found to drop)"
-        end try
-`;
-      } else if (params.newStatus === 'incomplete') {
-        script += `
-        -- Mark task as incomplete
-        mark incomplete foundItem
-        set end of changedProperties to "status (incomplete)"
-`;
-      }
-    }
-
-    // Move task to a different project
-    if (params.newProjectName !== undefined) {
-      if (params.newProjectName === '' || params.newProjectName.toLowerCase() === 'inbox') {
-        script += `
-        -- Move task to inbox by clearing its assigned container
-        set assigned container of foundItem to missing value
-        set end of changedProperties to "project (moved to inbox)"
-`;
-      } else {
-        // escapedProjectPath is for AppleScript string contexts (the
-        // changedProperties note below); the error JSON needs
-        // escapeForJsonInAppleScript instead — an AppleScript-escaped quote
-        // would re-materialize raw inside the JSON and corrupt it (#103).
-        const escapedProjectPath = escapeAppleScriptString(params.newProjectName);
-        const errorJson = `{\\\"success\\\":false,\\\"error\\\":\\\"Project not found: ${escapeForJsonInAppleScript(params.newProjectName)}\\\"}`;
-        const projectLookup = generateProjectLookupScript(params.newProjectName, 'destProject', errorJson);
-        script += `
-        -- Find the destination project (supports folder paths like "Work/My Project")
-        ${projectLookup}
-
-        move foundItem to end of tasks of destProject
-        set end of changedProperties to "project (moved to ${escapedProjectPath})"
-`;
-      }
-    }
-
-    // Nest under a parent task and/or place among siblings (#138), through
-    // Omni Automation's moveTasks(). After any newProjectName move, so a
-    // position alone reorders within the project the task just landed in.
-    if (params.newParentTaskId !== undefined || params.position !== undefined) {
-      script += `
-        -- Move within the hierarchy (reads the result back; throws on mismatch)
-        ${taskMoveScript('foundItem', { parentId: params.newParentTaskId, position: params.position })}
-        set end of changedProperties to _moveLabel
-`;
-    }
-  }
-
-  // Project-specific updates
-  if (itemType === 'project') {
-    // Update sequential status
-    if (params.newSequential !== undefined) {
-      script += `
-        -- Update sequential status
-        set sequential of foundItem to ${params.newSequential}
-        set end of changedProperties to "sequential"
-`;
-    }
-    
-    // Update project status. OmniFocus rejects setting status to done/dropped
-    // directly — those transitions require the mark complete/mark dropped verbs.
-    if (params.newProjectStatus !== undefined) {
-      if (params.newProjectStatus === 'dropped') {
-        script += `
-        -- Mark project as dropped (must use verb, not set status)
-        mark dropped foundItem
-        set end of changedProperties to "status (dropped)"
-`;
-      } else if (params.newProjectStatus === 'completed') {
-        script += `
-        -- Mark project as completed (must use verb, not set status)
-        mark complete foundItem
-        set end of changedProperties to "status (completed)"
-`;
-      } else {
-        const statusValue = params.newProjectStatus === 'active' ? 'active status' : 'on hold status';
-        script += `
-        -- Update project status
-        set status of foundItem to ${statusValue}
-        set end of changedProperties to "status (${params.newProjectStatus})"
-`;
-      }
-    }
-    
-    // Review interval (#139). Before markReviewed, so a combined call schedules
-    // the next review from the new interval.
-    if (params.newReviewInterval !== undefined) {
-      script += `
-        -- Set the review interval through Omni Automation (reads it back)
-        ${reviewIntervalScript('foundItem', params.newReviewInterval)}
-        set end of changedProperties to "review interval (every ${describeReviewInterval(params.newReviewInterval)})"
-`;
-    }
-
-    // Mark project as reviewed
-    if (params.markReviewed === true) {
-      script += `
-        -- Let OmniFocus compute the next review date from the review interval
-        set last review date of foundItem to current date
-        set next review date of foundItem to missing value
-        set end of changedProperties to "marked reviewed"
-`;
-    }
-
-    // Move to a new folder (supports nested paths like "Work/Engineering")
-    if (params.newFolderName !== undefined && params.newFolderName !== '') {
-      const errorJson = `{\\\"success\\\":false,\\\"error\\\":\\\"Folder not found: ${escapeForJsonInAppleScript(params.newFolderName)}\\\"}`;
-      const folderLookup = generateFolderLookupScript(params.newFolderName, 'destFolder', errorJson);
-      script += `
-        -- Find the destination folder
-        ${folderLookup}
-
-        -- Move project to the folder
-        move {foundItem} to end of projects of destFolder
-        set end of changedProperties to "folder"
-`;
-    }
-  }
-  
-  script += `
-        -- Prepare the changed properties as a string
-        set changedPropsText to ""
-        repeat with i from 1 to count of changedProperties
-          set changedPropsText to changedPropsText & item i of changedProperties
-          if i < count of changedProperties then
-            set changedPropsText to changedPropsText & ", "
-          end if
-        end repeat
-        
-        -- Return success with details. itemName and changedPropsText only exist
-        -- at script runtime, so they go through the jsonEscape handler — quotes
-        -- in an item name would otherwise corrupt the payload (#103).
-        return "{\\\"success\\\":true,\\\"id\\\":\\"" & itemId & "\\",\\\"name\\\":\\"" & my jsonEscape(itemName) & "\\",\\\"changedProperties\\\":\\"" & my jsonEscape(changedPropsText) & "\\"}"
-      else
-        -- Item not found
-        return "{\\\"success\\\":false,\\\"error\\\":\\\"Item not found\\"}"
-      end if
-    end tell
-  end tell
-on error errorMessage
-  return "{\\\"success\\\":false,\\\"error\\\":\\"" & my jsonEscape(errorMessage) & "\\"}"
-end try
-`;
-  
-  return script;
+interface EditItemScriptResult {
+  success: true;
+  id: string;
+  name: string;
+  changedProperties: string;
 }
 
 /**
- * An error thrown inside `evaluate javascript` reaches AppleScript's `on error`
- * as "Error: <message> undefined:1:436" — the JS error class and a source
- * offset into the one-line script. Neither helps the caller; keep the message.
+ * Validate the tool's parameters and translate them into the script's. Throws
+ * EditItemParamError, RepetitionSpecError, ReviewIntervalSpecError or an
+ * invalid-date error; editItem turns those into a failed result.
  */
-export function cleanScriptError(error: string): string {
-  return error.replace(/^Error: /, '').replace(/ undefined:\d+:\d+$/, '');
+export function buildEditItemScriptParams(params: EditItemParams): EditItemScriptParams {
+  const invalid = validateEditParams(params);
+  if (invalid) throw new EditItemParamError(invalid);
+
+  const out: EditItemScriptParams = {
+    itemType: params.itemType,
+    allowPastOccurrence: params.allowPastOccurrence === true,
+  };
+  if (params.id) out.id = params.id;
+  if (params.name) out.name = flattenName(params.name);
+
+  if (params.newName !== undefined) out.newName = flattenName(params.newName);
+  if (params.newNote !== undefined) out.newNote = params.newNote;
+  const due = editDateParam(params.newDueDate);
+  if (due !== undefined) out.newDueDate = due;
+  const defer = editDateParam(params.newDeferDate);
+  if (defer !== undefined) out.newDeferDate = defer;
+  const planned = editDateParam(params.newPlannedDate);
+  if (planned !== undefined) out.newPlannedDate = planned;
+  if (params.newFlagged !== undefined) out.newFlagged = params.newFlagged;
+  if (params.newEstimatedMinutes !== undefined) out.newEstimatedMinutes = params.newEstimatedMinutes;
+  if (params.newRepeat !== undefined) {
+    out.newRepeat = params.newRepeat === null
+      ? null
+      : compileRepetitionSpec(params.newRepeat, { isProject: params.itemType === 'project' });
+  }
+
+  if (params.replaceTags && params.replaceTags.length > 0) {
+    out.replaceTags = params.replaceTags.map(flattenName);
+  } else {
+    if (params.addTags && params.addTags.length > 0) out.addTags = params.addTags.map(flattenName);
+    if (params.removeTags && params.removeTags.length > 0) out.removeTags = params.removeTags.map(flattenName);
+  }
+
+  if (params.newStatus !== undefined) out.newStatus = params.newStatus;
+  if (params.newProjectName !== undefined) out.newProjectName = flattenName(params.newProjectName);
+  if (params.newParentTaskId !== undefined || params.position !== undefined) {
+    out.move = {};
+    if (params.newParentTaskId !== undefined) out.move.parentId = params.newParentTaskId;
+    if (params.position !== undefined) out.move.position = params.position;
+  }
+
+  if (params.newSequential !== undefined) out.newSequential = params.newSequential;
+  if (params.newProjectStatus !== undefined) out.newProjectStatus = params.newProjectStatus;
+  if (params.newReviewInterval !== undefined) {
+    out.newReviewInterval = compileReviewInterval(params.newReviewInterval);
+    out.reviewIntervalLabel = describeReviewInterval(params.newReviewInterval);
+  }
+  if (params.markReviewed === true) out.markReviewed = true;
+  if (params.newFolderName !== undefined && params.newFolderName !== '') out.newFolderName = params.newFolderName;
+
+  return out;
 }
 
 /**
@@ -568,75 +178,24 @@ export async function editItem(params: EditItemParams): Promise<{
   changedProperties?: string,
   error?: string
 }> {
-  let tempFile: string | undefined;
-  
   try {
-    // Generate AppleScript
-    const script = generateAppleScript(params);
-    
-    console.error("Executing AppleScript for editing (V2)...");
-    console.error(`Item type: ${params.itemType}, ID: ${params.id || 'not provided'}, Name: ${params.name || 'not provided'}`);
-    
-    // Log a preview of the script for debugging (first few lines)
-    const scriptPreview = script.split('\n').slice(0, 10).join('\n') + '\n...';
-    console.error("AppleScript preview:\n", scriptPreview);
-    
-    // Write script to temporary file to avoid shell escaping issues
-    tempFile = join(tmpdir(), `edit_omnifocus_${crypto.randomUUID()}.applescript`);
-    writeFileSync(tempFile, script);
-    
-    // Execute AppleScript from file
-    const { stdout, stderr } = await runOsascriptFile(tempFile);
-    
-    // Clean up temp file
-    try {
-      unlinkSync(tempFile);
-    } catch (cleanupError) {
-      console.error("Failed to clean up temp file:", cleanupError);
+    const scriptParams = buildEditItemScriptParams(params);
+    if (!params.id && !params.name) {
+      return { success: false, error: 'Either id or name must be provided' };
     }
-    
-    if (stderr) {
-      console.error("AppleScript stderr:", stderr);
+
+    const result = await executeOmniFocusWrite<EditItemScriptResult>('@editItem.js', scriptParams);
+    if (!result.success) {
+      return { success: false, error: result.error };
     }
-    
-    console.error("AppleScript stdout:", stdout);
-    
-    // Parse the result
-    try {
-      const result = JSON.parse(stdout);
-      
-      // Return the result
-      return {
-        success: result.success,
-        id: result.id,
-        name: result.name,
-        changedProperties: result.changedProperties,
-        error: typeof result.error === 'string' ? cleanScriptError(result.error) : result.error
-      };
-    } catch (parseError) {
-      console.error("Error parsing AppleScript result:", parseError);
-      return {
-        success: false,
-        error: `Failed to parse result: ${stdout}`
-      };
-    }
+    return {
+      success: true,
+      id: result.id,
+      name: result.name,
+      changedProperties: result.changedProperties,
+    };
   } catch (error: any) {
-    // Clean up temp file if it exists
-    if (tempFile) {
-      try {
-        unlinkSync(tempFile);
-      } catch (cleanupError) {
-        // Ignore cleanup errors
-      }
-    }
-    
     console.error("Error in editItem execution:", error);
-    
-    // Include more detailed error information
-    if (error.message && error.message.includes('syntax error')) {
-      console.error("This appears to be an AppleScript syntax error. Review the script generation logic.");
-    }
-    
     return {
       success: false,
       error: error?.message || "Unknown error in editItem"
