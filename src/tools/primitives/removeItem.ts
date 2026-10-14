@@ -1,12 +1,5 @@
-import { writeFileSync, unlinkSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
-import {
-  escapeAppleScriptString,
-  generateOccurrenceGuardScript,
-  JSON_ESCAPE_HANDLER,
-} from '../../utils/appleScriptHelpers.js';
-import { runOsascriptFile } from '../../utils/scriptExecution.js';
+import { executeOmniFocusWrite } from '../../utils/scriptExecution.js';
+import { flattenName } from '../../utils/writeParams.js';
 
 // Interface for item removal parameters
 export interface RemoveItemParams {
@@ -16,188 +9,43 @@ export interface RemoveItemParams {
   allowPastOccurrence?: boolean; // Opt in to removing a completed repeat occurrence (#124)
 }
 
-/**
- * Generate pure AppleScript for item removal
- */
-export function generateAppleScript(params: RemoveItemParams): string {
-  // Sanitize and prepare parameters for AppleScript
-  const id = params.id ? escapeAppleScriptString(params.id) : '';
-  const name = params.name ? escapeAppleScriptString(params.name) : '';
-  const itemType = params.itemType;
+/** What removeItem.js receives. */
+export interface RemoveItemScriptParams {
+  id?: string;
+  name?: string;
+  itemType: 'task' | 'project';
+  allowPastOccurrence: boolean;
+}
 
-  // Verify we have at least one identifier
-  if (!id && !name) {
-    return `return "{\\\"success\\\":false,\\\"error\\\":\\\"Either id or name must be provided\\\"}"`;
-  }
-
-  // Construct AppleScript with error handling
-  let script = JSON_ESCAPE_HANDLER + `
-  try
-    tell application "OmniFocus"
-      tell front document
-        -- Find the item to remove
-        set foundItem to missing value
-`;
-
-  // Add ID search if provided — whose clause gives direct references
-  if (id) {
-    if (itemType === 'task') {
-      script += `
-        -- Find task by ID (flattened tasks includes inbox tasks)
-        try
-          set foundItem to first flattened task whose id is "${id}"
-        end try
-`;
-    } else {
-      script += `
-        -- Find project by ID
-        try
-          set foundItem to first flattened project whose id is "${id}"
-        end try
-`;
-    }
-  }
-
-  // Add name search if provided (and no ID or as fallback)
-  if (!id && name) {
-    if (itemType === 'task') {
-      script += `
-        -- Find task by name (flattened tasks includes inbox tasks)
-        try
-          set foundItem to first flattened task whose name is "${name}"
-        end try
-`;
-    } else {
-      script += `
-        -- Find project by name
-        try
-          set foundItem to first flattened project whose name is "${name}"
-        end try
-`;
-    }
-  } else if (id && name) {
-    if (itemType === 'task') {
-      script += `
-        -- If ID search failed, try to find by name as fallback
-        if foundItem is missing value then
-          try
-            set foundItem to first flattened task whose name is "${name}"
-          end try
-        end if
-`;
-    } else {
-      script += `
-        -- If ID search failed, try to find project by name as fallback
-        if foundItem is missing value then
-          try
-            set foundItem to first flattened project whose name is "${name}"
-          end try
-        end if
-`;
-    }
-  }
-
-  // Add the rest of the script
-  script += `
-        -- If we found the item, remove it
-        if foundItem is not missing value then
-          set itemName to name of foundItem
-          set itemId to id of foundItem as string
-          ${params.allowPastOccurrence ? '' : generateOccurrenceGuardScript('foundItem', `{\\"success\\":false,\\"error\\":\\"This is a completed occurrence of a repeating item, not a duplicate. Mutating it can cascade through the live repeat chain. Query without includeCompleted to get the live occurrence, or pass allowPastOccurrence: true if you really mean this one.\\"}`)}
-
-          -- Delete the item
-          delete foundItem
-
-          -- Return success. itemName only exists at script runtime, so it goes
-          -- through the jsonEscape handler — quotes in an item name would
-          -- otherwise corrupt the payload (#103).
-          return "{\\\"success\\\":true,\\\"id\\\":\\"" & itemId & "\\",\\\"name\\\":\\"" & my jsonEscape(itemName) & "\\"}"
-        else
-          -- Item not found
-          return "{\\\"success\\\":false,\\\"error\\\":\\\"Item not found\\\"}"
-        end if
-      end tell
-    end tell
-  on error errorMessage
-    return "{\\\"success\\\":false,\\\"error\\\":\\"" & my jsonEscape(errorMessage) & "\\"}"
-  end try
-  `;
-
-  return script;
+interface RemoveItemScriptResult {
+  success: true;
+  id: string;
+  name: string;
 }
 
 /**
  * Remove a task or project from OmniFocus
  */
 export async function removeItem(params: RemoveItemParams): Promise<{success: boolean, id?: string, name?: string, error?: string}> {
-  let tempFile: string | undefined;
-
   try {
-    // Generate AppleScript
-    const script = generateAppleScript(params);
-
-    console.error("Executing AppleScript for removal...");
-    console.error(`Item type: ${params.itemType}, ID: ${params.id || 'not provided'}, Name: ${params.name || 'not provided'}`);
-
-    // Log a preview of the script for debugging (first few lines)
-    const scriptPreview = script.split('\n').slice(0, 10).join('\n') + '\n...';
-    console.error("AppleScript preview:\n", scriptPreview);
-
-    // Write script to temporary file to avoid shell escaping issues
-    tempFile = join(tmpdir(), `remove_omnifocus_${crypto.randomUUID()}.applescript`);
-    writeFileSync(tempFile, script);
-
-    // Execute AppleScript from file
-    const { stdout, stderr } = await runOsascriptFile(tempFile);
-
-    // Clean up temp file
-    try {
-      unlinkSync(tempFile);
-    } catch (cleanupError) {
-      console.error("Failed to clean up temp file:", cleanupError);
+    if (!params.id && !params.name) {
+      return { success: false, error: 'Either id or name must be provided' };
     }
 
-    if (stderr) {
-      console.error("AppleScript stderr:", stderr);
+    const scriptParams: RemoveItemScriptParams = {
+      itemType: params.itemType,
+      allowPastOccurrence: params.allowPastOccurrence === true,
+    };
+    if (params.id) scriptParams.id = params.id;
+    if (params.name) scriptParams.name = flattenName(params.name);
+
+    const result = await executeOmniFocusWrite<RemoveItemScriptResult>('@removeItem.js', scriptParams);
+    if (!result.success) {
+      return { success: false, error: result.error };
     }
-
-    console.error("AppleScript stdout:", stdout);
-
-    // Parse the result
-    try {
-      const result = JSON.parse(stdout);
-
-      // Return the result
-      return {
-        success: result.success,
-        id: result.id,
-        name: result.name,
-        error: result.error
-      };
-    } catch (parseError) {
-      console.error("Error parsing AppleScript result:", parseError);
-      return {
-        success: false,
-        error: `Failed to parse result: ${stdout}`
-      };
-    }
+    return { success: true, id: result.id, name: result.name };
   } catch (error: any) {
-    // Clean up temp file if it exists
-    if (tempFile) {
-      try {
-        unlinkSync(tempFile);
-      } catch (cleanupError) {
-        // Ignore cleanup errors
-      }
-    }
-
     console.error("Error in removeItem execution:", error);
-
-    // Include more detailed error information
-    if (error.message && error.message.includes('syntax error')) {
-      console.error("This appears to be an AppleScript syntax error. Review the script generation logic.");
-    }
-
     return {
       success: false,
       error: error?.message || "Unknown error in removeItem"

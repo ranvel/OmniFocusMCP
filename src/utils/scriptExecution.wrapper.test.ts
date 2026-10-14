@@ -110,11 +110,22 @@ const HOSTILE = [
 ];
 
 describe('write wrapper (executeOmniFocusWrite)', () => {
-  it('ships the helpers prelude and the params as one JSON argument', async () => {
+  it('ships the prelude, the helpers, the params as one JSON argument, then the script', async () => {
     const out = await executeOmniFocusWrite(ECHO, { name: 'x' });
     expect(out).toEqual({ ok: true });
     expect(captured).toHaveLength(1);
-    await expect(captured[0]).toMatchFileSnapshot('./__snapshots__/wrapper.write.echoParams.jxa.txt');
+    const payload = payloadOf(captured[0]);
+    const at = (s: string) => {
+      const i = payload.indexOf(s);
+      expect(i, `payload should contain ${JSON.stringify(s)}`).toBeGreaterThanOrEqual(0);
+      return i;
+    };
+    const prelude = at('const formatDate = function formatDateLocal(date)');
+    const helpers = at('function runWrite(body)');
+    const argv = at('const argv = ["{\\"name\\":\\"x\\"}"];');
+    const script = at('runWrite(function (params)');
+    expect([prelude, helpers, argv, script]).toEqual([...[prelude, helpers, argv, script]].sort((a, b) => a - b));
+    expect(execCalls[0]).toMatch(/^osascript -l JavaScript "/);
   });
 
   it('never retries a -1712 — a write may have partially applied', async () => {

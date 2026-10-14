@@ -2,11 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { generateAppleScript as addTask } from './addOmniFocusTask.js';
 import { generateAppleScript as addProject } from './addProject.js';
 import { generateAppleScript as editItem } from './editItem.js';
-import { generateAppleScript as removeItem } from './removeItem.js';
 import { schema as addTaskSchema } from '../definitions/addOmniFocusTask.js';
 import { schema as addProjectSchema } from '../definitions/addProject.js';
 import { schema as editItemSchema } from '../definitions/editItem.js';
 import { schema as batchSchema } from '../definitions/batchAddItems.js';
+import { buildWorld, RepetitionRule } from '../../utils/__tests__/omniJsFake.js';
+import { runWriteScript } from '../../utils/__tests__/runWriteScript.js';
 
 /**
  * Repetition writes (#116). Rules are written through Omni Automation
@@ -184,8 +185,14 @@ describe('past-occurrence guard (#124)', () => {
   });
 
   it('guards remove_item by default', () => {
-    const script = removeItem({ id: 'abc.5', itemType: 'task' });
-    expect(script).toContain('completed occurrence of a repeating item');
+    const w = buildWorld();
+    const live = w.task('Daily', null, 'abc');
+    live.repetitionRule = new RepetitionRule('FREQ=DAILY', null, 'Regularly', 'DueDate', false);
+    const done = live.markComplete();
+    const out = runWriteScript('removeItem.js', { id: done.id.primaryKey, itemType: 'task', allowPastOccurrence: false }, w.globals);
+    expect(out.success).toBe(false);
+    expect(out.error).toContain('completed occurrence of a repeating item');
+    expect(w.tasks).toContain(done);
   });
 
   it('is opt-out-able for the rare deliberate case', () => {

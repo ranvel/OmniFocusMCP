@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { generateAppleScript as generateAddTaskScript } from './addOmniFocusTask.js';
 import { generateAppleScript as generateAddProjectScript } from './addProject.js';
-import { generateAppleScript as generateRemoveItemScript } from './removeItem.js';
 import { generateAppleScript as generateEditItemScript } from './editItem.js';
 import { buildWorld } from '../../utils/__tests__/omniJsFake.js';
 import { runWriteScript } from '../../utils/__tests__/runWriteScript.js';
@@ -106,11 +105,11 @@ describe('write-result JSON payload safety (#103)', () => {
   });
 
   describe('remove_item', () => {
-    it('routes the runtime item name and error text through jsonEscape', () => {
-      const script = generateRemoveItemScript({ id: 'abc', itemType: 'task' });
-      expect(script).toContain('on jsonEscape(theText)');
-      expect(script).toContain('my jsonEscape(itemName)');
-      expect(script).toContain('my jsonEscape(errorMessage)');
+    it('the result parses and carries a hostile runtime item name verbatim', () => {
+      const w = buildWorld();
+      w.task(HOSTILE, null, 'abc');
+      const out = runWriteScript('removeItem.js', { id: 'abc', itemType: 'task', allowPastOccurrence: false }, w.globals);
+      expect(out).toEqual({ success: true, id: 'abc', name: HOSTILE });
     });
   });
 
@@ -150,7 +149,6 @@ describe('write-result JSON payload safety (#103)', () => {
     const scripts = [
       generateAddTaskScript({ name: 'x' }),
       generateAddProjectScript({ name: 'x' }),
-      generateRemoveItemScript({ id: 'abc', itemType: 'task' }),
       generateEditItemScript({ id: 'abc', itemType: 'task', newName: 'y' }),
     ];
     for (const script of scripts) {

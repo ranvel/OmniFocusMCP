@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { buildWorld } from './omniJsFake.js';
+import { buildWorld, RepetitionRule } from './omniJsFake.js';
 import { loadHelpers, runWriteScript, SCRIPTS_DIR } from './runWriteScript.js';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -99,5 +99,82 @@ describe('ensureTag', () => {
     expect(t.parent).toBeNull();
     expect(w.tags).toEqual([t]);
     expect(h.ensureTag('New')).toBe(t);
+  });
+});
+
+describe('resolveTaskOrProject', () => {
+  it('finds a task by id, then falls back to its name', () => {
+    const w = buildWorld();
+    const t = w.task('Write report', null, 'T1');
+    const h = loadHelpers(w.globals);
+    expect(h.resolveTaskOrProject('task', 'T1', undefined)).toBe(t);
+    expect(h.resolveTaskOrProject('task', 'stale', 'Write report')).toBe(t);
+    expect(h.resolveTaskOrProject('task', undefined, 'write REPORT')).toBe(t);
+    expect(h.resolveTaskOrProject('task', 'stale', 'nothing')).toBeNull();
+  });
+
+  it('finds a project by project id, by its root task id, or by name (#77)', () => {
+    const w = buildWorld();
+    const p = w.project('Work', null, 'P1');
+    const h = loadHelpers(w.globals);
+    expect(h.resolveTaskOrProject('project', 'P1', undefined)).toBe(p);
+    expect(h.resolveTaskOrProject('project', p.task.id.primaryKey, undefined)).toBe(p);
+    expect(h.resolveTaskOrProject('project', undefined, 'work')).toBe(p);
+    expect(h.resolveProjectByIdOrRootTaskId('nope')).toBeNull();
+  });
+
+  it('does not hand back a task when asked for a project with a task id', () => {
+    const w = buildWorld();
+    const P = w.project('Work');
+    w.task('child', P, 'C1');
+    const h = loadHelpers(w.globals);
+    expect(h.resolveTaskOrProject('project', 'C1', undefined)).toBeNull();
+  });
+
+  it('itemId reports the root task id for a project', () => {
+    const w = buildWorld();
+    const p = w.project('Work', null, 'P1');
+    const t = w.task('x', p, 'T1');
+    const h = loadHelpers(w.globals);
+    expect(h.itemId(p, 'project')).toBe('P1');
+    expect(h.itemId(t, 'task')).toBe('T1');
+  });
+});
+
+describe('occurrence guard (#124)', () => {
+  const rule = () => new RepetitionRule('FREQ=DAILY', null, 'Regularly', 'DueDate', false);
+
+  it('trips for a completed or dropped occurrence of a repeating task', () => {
+    const w = buildWorld();
+    const h = loadHelpers(w.globals);
+    const live = w.task('Daily', null, 'D');
+    live.repetitionRule = rule();
+    const done = live.markComplete();
+    expect(h.isPastOccurrence(done, 'task')).toBe(true);
+    expect(h.isPastOccurrence(live, 'task')).toBe(false);
+    live.drop(false);
+    const dropped = w.tasks.find(t => t.dropDate)!;
+    expect(h.isPastOccurrence(dropped, 'task')).toBe(true);
+    expect(() => h.assertLiveOccurrence(done, 'task')).toThrow(/completed occurrence of a repeating item/);
+    expect(() => h.assertLiveOccurrence(live, 'task')).not.toThrow();
+  });
+
+  it('does not trip for a completed task that does not repeat', () => {
+    const w = buildWorld();
+    const t = w.task('Once', null);
+    t.markComplete();
+    expect(loadHelpers(w.globals).isPastOccurrence(t, 'task')).toBe(false);
+  });
+
+  it('judges a repeating project by its own status, not its id shape', () => {
+    const w = buildWorld();
+    const h = loadHelpers(w.globals);
+    const live = w.project('Weekly review', null, 'bY_WHmMzWfC.116');
+    live.repetitionRule = rule();
+    expect(h.isPastOccurrence(live, 'project')).toBe(false);
+    const done = w.project('Weekly review', null, 'bY_WHmMzWfC.116.43');
+    done.repetitionRule = rule();
+    done.markComplete();
+    expect(h.isPastOccurrence(done, 'project')).toBe(true);
   });
 });

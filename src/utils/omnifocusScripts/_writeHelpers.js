@@ -58,3 +58,64 @@ function dateFromParts(p) {
 function ensureTag(name) {
   return firstByName(flattenedTags, name) || new Tag(name);
 }
+
+/**
+ * The project for an id in either namespace: a project id, or the id of the
+ * project's root task (what AppleScript called the project's id, #77). In
+ * current OmniFocus the two are the same string; accepting both keeps every
+ * id a query ever handed out working.
+ */
+function resolveProjectByIdOrRootTaskId(id) {
+  var project = Project.byIdentifier(id);
+  if (project) return project;
+  var task = Task.byIdentifier(id);
+  return task && task.project ? task.project : null;
+}
+
+/**
+ * The item edit_item / remove_item operate on: by id first, then by name as a
+ * fallback (AppleScript's `whose name is`, so case-insensitive). Null if
+ * neither finds anything.
+ */
+function resolveTaskOrProject(itemType, id, name) {
+  var item = null;
+  if (id) {
+    item = itemType === 'project' ? resolveProjectByIdOrRootTaskId(id) : Task.byIdentifier(id);
+  }
+  if (!item && name) {
+    item = firstByName(itemType === 'project' ? flattenedProjects : flattenedTasks, name);
+  }
+  return item;
+}
+
+/** The id a result reports: a project's is its root task's id (#77). */
+function itemId(item, itemType) {
+  return itemType === 'project' ? item.task.id.primaryKey : item.id.primaryKey;
+}
+
+var OCCURRENCE_GUARD_ERROR =
+  'This is a completed occurrence of a repeating item, not a duplicate. Mutating it can cascade ' +
+  'through the live repeat chain. Query without includeCompleted to get the live occurrence, or ' +
+  'pass allowPastOccurrence: true if you really mean this one.';
+
+/**
+ * True for a completed or dropped occurrence of a repeating item (#124).
+ *
+ * OmniFocus keeps each resolved occurrence as its own row with the same name
+ * and rule as the live one; mutating such a row cascades through the chain.
+ * Deliberately not an id-shape check: a repeating project's live id is itself
+ * dotted. What separates history from the live item is a repetition rule plus
+ * a terminal status of its own (not inherited from a container).
+ */
+function isPastOccurrence(item, itemType) {
+  if (!item.repetitionRule) return false;
+  if (itemType === 'project') {
+    return item.status === Project.Status.Done || item.status === Project.Status.Dropped;
+  }
+  return item.completed === true || (item.dropDate !== null && item.dropDate !== undefined);
+}
+
+/** Throw the #124 refusal unless the item is the live occurrence. */
+function assertLiveOccurrence(item, itemType) {
+  if (isPastOccurrence(item, itemType)) throw new Error(OCCURRENCE_GUARD_ERROR);
+}
