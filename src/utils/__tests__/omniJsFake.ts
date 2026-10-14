@@ -201,6 +201,13 @@ export class FakeProject {
   get completed() { return this.status === PSTATUS.Done; }
   get children() { return this.task.children; }
   get tasks() { return this.task.children; }
+  /** Every task in the project, depth first. */
+  get flattenedTasks(): FakeTask[] {
+    const out: FakeTask[] = [];
+    const walk = (ts: FakeTask[]) => ts.forEach(t => { out.push(t); walk(t.children); });
+    walk(this.task.children);
+    return out;
+  }
   get beginning(): Loc { return this.task.beginning; }
   get ending(): Loc { return this.task.ending; }
 

@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { generateAppleScript as generateAddTaskScript } from './addOmniFocusTask.js';
 import { generateAppleScript as generateEditItemScript } from './editItem.js';
 import { buildWorld } from '../../utils/__tests__/omniJsFake.js';
 import { runWriteScript } from '../../utils/__tests__/runWriteScript.js';
@@ -37,33 +36,21 @@ function lineContaining(script: string, marker: string): string {
 
 describe('write-result JSON payload safety (#103)', () => {
   describe('add_omnifocus_task', () => {
-    it('does not echo the task name into the success payload', () => {
-      const script = generateAddTaskScript({ name: HOSTILE });
-      const success = lineContaining(script, '\\"taskId\\"');
-      expect(success).not.toContain('policy');
-      expect(success).toContain('placement');
-    });
-
-    it('routes AppleScript error text through jsonEscape', () => {
-      const script = generateAddTaskScript({ name: 'x' });
-      expect(script).toContain('on jsonEscape(theText)');
-      expect(script).toContain('my jsonEscape(errorMessage)');
+    it('the success payload parses with a hostile task name and does not echo it', () => {
+      const out = runWriteScript('addTask.js', { name: HOSTILE }, buildWorld().globals);
+      expect(out.success).toBe(true);
+      expect(out.placement).toBe('inbox');
+      expect(JSON.stringify(out)).not.toContain('policy');
     });
 
     it('project-not-found error JSON survives a quoted project name', () => {
-      const script = generateAddTaskScript({ name: 'x', projectName: HOSTILE });
-      // The script always also contains the projectId branch's "Project not
-      // found: id" line, so anchor on the name itself.
-      const result = parseReturnedJson(lineContaining(script, 'Project not found: retitle'));
-      expect(result.success).toBe(false);
-      expect(result.error).toBe(`Project not found: ${HOSTILE}`);
+      const out = runWriteScript('addTask.js', { name: 'x', projectName: HOSTILE }, buildWorld().globals);
+      expect(out).toEqual({ success: false, error: `Project not found: ${HOSTILE}` });
     });
 
     it('project-not-found-by-id error JSON survives a quoted id', () => {
-      const script = generateAddTaskScript({ name: 'x', projectId: 'id "with" quotes' });
-      const result = parseReturnedJson(lineContaining(script, 'Project not found: id'));
-      expect(result.success).toBe(false);
-      expect(result.error).toBe('Project not found: id id "with" quotes');
+      const out = runWriteScript('addTask.js', { name: 'x', projectId: 'id "with" quotes' }, buildWorld().globals);
+      expect(out).toEqual({ success: false, error: 'Project not found: id id "with" quotes' });
     });
   });
 
@@ -138,7 +125,6 @@ describe('write-result JSON payload safety (#103)', () => {
 
   it('every write script defines the jsonEscape handler exactly once', () => {
     const scripts = [
-      generateAddTaskScript({ name: 'x' }),
       generateEditItemScript({ id: 'abc', itemType: 'task', newName: 'y' }),
     ];
     for (const script of scripts) {

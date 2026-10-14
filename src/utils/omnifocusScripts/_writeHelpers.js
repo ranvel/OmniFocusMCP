@@ -242,3 +242,20 @@ function addTagsByName(item, names) {
     }
   }
 }
+
+/**
+ * Where a new task actually landed, for add_omnifocus_task's `placement`:
+ * 'parent' when it sits under the parent the caller asked for, 'project' when
+ * it is at a project's top level (or under some other task), 'inbox'
+ * otherwise. If the hierarchy cannot be read, fall back to what was requested.
+ */
+function placementOf(task, requestedParent, requestedProject) {
+  try {
+    var container = task.parent;
+    if (requestedParent && container === requestedParent) return 'parent';
+    if (task.inInbox || !container) return task.containingProject ? 'project' : 'inbox';
+    return 'project';
+  } catch (e) {
+    return requestedProject ? 'project' : 'inbox';
+  }
+}

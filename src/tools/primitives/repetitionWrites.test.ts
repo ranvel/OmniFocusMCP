@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { generateAppleScript as addTask } from './addOmniFocusTask.js';
+import { buildAddTaskScriptParams } from './addOmniFocusTask.js';
 import { buildAddProjectScriptParams } from './addProject.js';
 import { generateAppleScript as editItem } from './editItem.js';
 import { schema as addTaskSchema } from '../definitions/addOmniFocusTask.js';
@@ -16,15 +16,19 @@ import { runWriteScript } from '../../utils/__tests__/runWriteScript.js';
  * site uses that path, on the right variable, AFTER its date writes.
  */
 describe('repetition rule on create (#116)', () => {
-  it('add_omnifocus_task writes through Omni Automation on newTask', () => {
-    const script = addTask({
+  it('add_omnifocus_task writes through Omni Automation on the new task', () => {
+    const params = buildAddTaskScriptParams({
       name: 'Weekly review',
       repeat: { method: 'start-after-completion', unit: 'week' },
     });
-    expect(script).toContain('set _repetitionId to id of newTask as string');
-    expect(script).toContain("new Task.RepetitionRule('FREQ=WEEKLY'");
-    expect(script).toContain('Task.RepetitionScheduleType.FromCompletion');
-    expect(script).not.toContain('{repetition method:');
+    expect(params.repeat).toEqual({
+      method: 'start-after-completion', recurrence: 'FREQ=WEEKLY', schedule: 'FromCompletion', anchorKey: 'DeferDate', catchUp: false, isProject: false,
+    });
+    const w = buildWorld();
+    expect(runWriteScript('addTask.js', params, w.globals).success).toBe(true);
+    const rule = w.inboxList[0].repetitionRule!;
+    expect(rule.ruleString).toBe('FREQ=WEEKLY');
+    expect(String(rule.scheduleType)).toBe('FromCompletion');
   });
 
   it('add_project writes on the project (projects can repeat)', () => {
@@ -43,35 +47,36 @@ describe('repetition rule on create (#116)', () => {
   });
 
   it('writes the rule after the dates, so a defaulted anchor sees them', () => {
-    const script = addTask({
+    const params = buildAddTaskScriptParams({
       name: 'Fri review',
       deferDate: '2026-10-02',
       dueDate: '2026-10-09',
       repeat: { method: 'fixed', unit: 'week', weekdays: ['FR'] },
     });
-    const rule = script.indexOf('set _repetitionId');
-    expect(rule).toBeGreaterThan(script.indexOf('set defer date of newTask'));
-    expect(rule).toBeGreaterThan(script.indexOf('set due date of newTask'));
+    const w = buildWorld();
+    runWriteScript('addTask.js', params, w.globals);
+    // Only a rule written after the due date lands can default to it.
+    expect(String(w.inboxList[0].repetitionRule!.anchorDateKey)).toBe('DueDate');
   });
 
   it('emits no repetition statement when no repeat is requested', () => {
-    expect(addTask({ name: 'One-shot' })).not.toContain('RepetitionRule');
+    expect(buildAddTaskScriptParams({ name: 'One-shot' })).not.toHaveProperty('repeat');
     expect(buildAddProjectScriptParams({ name: 'One-shot' })).not.toHaveProperty('repeat');
   });
 
   it('compiles weekday sets through', () => {
-    const script = addTask({
+    const params = buildAddTaskScriptParams({
       name: 'Strength',
       repeat: { method: 'fixed', unit: 'week', weekdays: ['TU', 'TH'] },
     });
-    expect(script).toContain("'FREQ=WEEKLY;BYDAY=TU,TH'");
+    expect(params.repeat!.recurrence).toBe('FREQ=WEEKLY;BYDAY=TU,TH');
   });
 
   it('throws rather than creating a task with a silently-dropped repeat', () => {
     // The whole point of the feature is that repeats stop arriving inert; an
     // invalid spec must not degrade into "created, reported success, no repeat".
     expect(() =>
-      addTask({ name: 'Bad', repeat: { method: 'fixed', unit: 'week', steps: 0 } as any })
+      buildAddTaskScriptParams({ name: 'Bad', repeat: { method: 'fixed', unit: 'week', steps: 0 } as any })
     ).toThrow();
   });
 });
