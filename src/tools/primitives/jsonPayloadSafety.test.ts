@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { generateAppleScript as generateAddTaskScript } from './addOmniFocusTask.js';
 import { generateAppleScript as generateAddProjectScript } from './addProject.js';
-import { generateAppleScript as generateCreateTagScript } from './createTag.js';
 import { generateAppleScript as generateRemoveItemScript } from './removeItem.js';
 import { generateAppleScript as generateEditItemScript } from './editItem.js';
+import { buildWorld } from '../../utils/__tests__/omniJsFake.js';
+import { runWriteScript } from '../../utils/__tests__/runWriteScript.js';
 
 /**
  * Issue #103: every write primitive returns a hand-built JSON payload from
@@ -90,17 +91,17 @@ describe('write-result JSON payload safety (#103)', () => {
   });
 
   describe('create_tag', () => {
-    it('does not echo the tag name into the success payload', () => {
-      const script = generateCreateTagScript({ name: HOSTILE });
-      const success = lineContaining(script, '\\"tagId\\"');
-      expect(success).not.toContain('policy');
+    // Migrated to OmniJS: the payload is JSON.stringify'd inside OmniFocus, so
+    // the hostile name is handled by construction. Pinned by running the script.
+    it('the success payload parses with a hostile tag name and does not echo it', () => {
+      const out = runWriteScript('createTag.js', { name: HOSTILE }, buildWorld().globals);
+      expect(out.success).toBe(true);
+      expect(JSON.stringify(out)).not.toContain('policy');
     });
 
     it('parent-not-found error JSON survives a quoted parent name', () => {
-      const script = generateCreateTagScript({ name: 'x', parentTagName: 'the "urgent" bucket' });
-      const result = parseReturnedJson(lineContaining(script, 'Parent tag not found'));
-      expect(result.success).toBe(false);
-      expect(result.error).toBe('Parent tag not found: the "urgent" bucket');
+      const out = runWriteScript('createTag.js', { name: 'x', parentTagName: 'the "urgent" bucket' }, buildWorld().globals);
+      expect(out).toEqual({ success: false, error: 'Parent tag not found: the "urgent" bucket' });
     });
   });
 
@@ -149,7 +150,6 @@ describe('write-result JSON payload safety (#103)', () => {
     const scripts = [
       generateAddTaskScript({ name: 'x' }),
       generateAddProjectScript({ name: 'x' }),
-      generateCreateTagScript({ name: 'x' }),
       generateRemoveItemScript({ id: 'abc', itemType: 'task' }),
       generateEditItemScript({ id: 'abc', itemType: 'task', newName: 'y' }),
     ];
